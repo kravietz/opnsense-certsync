@@ -20,7 +20,7 @@ import os.path
 import shutil
 import tempfile
 from typing import Dict
-
+import sys
 import requests
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
@@ -29,6 +29,7 @@ from cryptography.x509.oid import NameOID
 KEY: str = os.environ.get("OPNSENSE_KEY")
 SECRET: str = os.environ.get("OPNSENSE_SECRET")
 API: str = os.environ.get("OPNSENSE_API")
+VERIFY: bool = os.environ.get("OPNSENSE_VERIFY", "true").lower() == "true"
 
 if not all((KEY, SECRET, API)):
     raise Exception("OPNSENSE_KEY, OPNSENSE_SECRET and OPNSENSE_API environment variables must be set")
@@ -84,7 +85,10 @@ def sync_file(path: str, content: str) -> bool:
 
 
 def get_issuer(issuer: str):
-    url = ANCHORS[issuer]
+    try:
+        url = ANCHORS[issuer]
+    except KeyError:
+        raise Exception(f"Unknown issuer: {issuer}")
     r = requests.get(url)
     if r.ok:
         return r.text
@@ -101,11 +105,12 @@ args = cli.parse_args()
 print(f"Using OPNsense: {SEARCH_API}")
 print(f"Fetching certificate for {args.common_name}")
 
-r = requests.get(SEARCH_API, auth=(KEY, SECRET))
+r = requests.get(SEARCH_API, auth=(KEY, SECRET), verify=VERIFY)
 if not r.ok:
     raise Exception(f"Failed to access OPNSense API: {r.status_code}: {r.reason}")
 
 certs: Dict = r.json()
+exit_code : int = 0
 
 for cert in certs['rows']:
 
@@ -118,7 +123,8 @@ for cert in certs['rows']:
         if args.private_key:
             print(f"Syncing private key {args.private_key}... ", end="")
             if sync_file(args.private_key, prv_payload):
-                print("updated")
+                print("UPDATED")
+                exit_code = 1
             else:
                 print("unchanged")
 
@@ -130,13 +136,16 @@ for cert in certs['rows']:
             print("Building certificate bundle...")
             if issuer in ANCHORS:
                 issuer = get_issuer(issuer)
-                bundle = issuer + crt_payload
+                bundle = crt_payload + issuer
                 print(f"Syncing certificate bundle file {args.certificate}... ", end="")
                 if sync_file(args.certificate, bundle):
-                    print("done")
+                    print("UPDATED")
+                    exit_code = 1
                 else:
                     print("unchanged")
             else:
                 raise Exception(f"Unknown issuer: {issuer}")
 
         break
+
+sys.exit(exit_code)
